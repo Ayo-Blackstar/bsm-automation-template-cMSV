@@ -59,6 +59,8 @@ function buildCallFields(body, stage) {
     { name: 'Opportunity_value', value: body.opportunity_value || '', inline: true },
     { name: 'Pipeline_name', value: body.pipeline_name || '', inline: true },
     { name: 'Owner', value: body.assigned_user || '', inline: true },
+    { name: 'Calendar', value: body.calendar_name || '', inline: true },
+    { name: 'Appointment', value: body.appointment_date || '', inline: true },
   ];
 
   if (body.booked_by) fields.push({ name: '📋 Booked By (Setter)', value: body.booked_by, inline: true });
@@ -89,6 +91,8 @@ function buildStageFields(body, stage) {
     { name: 'Opportunity_value', value: body.opportunity_value || '', inline: true },
     { name: 'Pipeline_name', value: body.pipeline_name || '', inline: true },
     { name: 'Owner', value: body.assigned_user || '', inline: true },
+    { name: 'Calendar', value: body.calendar_name || '', inline: true },
+    { name: 'Appointment', value: body.appointment_date || '', inline: true },
   ];
 
   if (body.booked_by) fields.push({ name: '📋 Booked By (Setter)', value: body.booked_by, inline: true });

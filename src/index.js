@@ -6,7 +6,7 @@ const app = express();
 const stripeRoutes = require('./routes/stripe');
 app.use('/stripe', stripeRoutes);
 
-app.use(express.json());
+app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
@@ -21,6 +21,7 @@ app.use('/typeform', typeformRoutes);
 app.use('/whop', whopRoutes);
 app.use('/airtable', airtableRoutes);
 app.use('/eod', eodRoutes);
+app.use('/cook', require('./routes/cook'));
 
 // Health check
 app.get('/', (req, res) => {

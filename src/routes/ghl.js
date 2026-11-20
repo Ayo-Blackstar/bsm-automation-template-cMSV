@@ -159,6 +159,24 @@ router.post('/booked-call', async (req, res) => {
   }
 });
 
+// Ad / self-booked calendar bookings (setter calendar bookings use /booked-call)
+router.post('/self-booked', async (req, res) => {
+  try {
+    console.log('SELF-BOOKED PAYLOAD:', JSON.stringify(req.body));
+    const contactId = req.body.contact_id || req.body.contactId || '';
+    const dedupKey = `self-booked-${contactId}-${req.body.email || ''}`;
+    if (isDuplicate(dedupKey)) return res.json({ success: true, skipped: 'duplicate' });
+
+    const embed = createEmbed('🟢 New Call Booked - SELF BOOKED', buildCallFields(req.body, 'Call Booked'), COLORS.GREEN);
+    await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
+    await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
+    await addToSheet(req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/confirmed-call', async (req, res) => {
   try {
     const contactId = req.body.contact_id || req.body.contactId || '';

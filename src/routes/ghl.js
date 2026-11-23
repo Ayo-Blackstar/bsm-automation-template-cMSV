@@ -3,6 +3,7 @@ const router = express.Router();
 const { sendDiscordMessage, createEmbed, COLORS } = require('../utils/discord');
 const { sendSlackMessage } = require('../utils/slack');
 const { google } = require('googleapis');
+const axios = require('axios');
 
 const recentNotifications = new Map();
 const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -148,7 +149,6 @@ router.post('/booked-call', async (req, res) => {
     const dedupKey = `booked-${contactId}-${req.body.email || ''}`;
     if (isDuplicate(dedupKey)) return res.json({ success: true, skipped: 'duplicate' });
 
-    // Setter booked — purple colour
     const embed = createEmbed('🟣 New Call Booked - SETTER BOOKED', buildCallFields(req.body, 'Call Booked'), COLORS.PURPLE);
     await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
     await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
@@ -297,56 +297,136 @@ router.post('/closed-deal', async (req, res) => {
   }
 });
 
-    // New lead from a HighLevel form / Facebook lead form workflow (e.g. Local Service Businesses).
-    // Add ?key=<GHL_WEBHOOK_KEY> to the webhook URL when that env var is set.
-    const STANDARD_KEYS = new Set(['contact_id','contactId','first_name','last_name','full_name','name','email','phone',
-      'tags','country','timezone','date_created','contact_source','contact_type','full_address','city','state','postal_code',
-      'location','workflow','triggerData','contact','attributionSource','customData','user','company_name','id']);
-    
-    router.post('/new-lead', async (req, res) => {
+// New lead from a HighLevel form / Facebook lead form workflow
+const STANDARD_KEYS = new Set(['contact_id','contactId','first_name','last_name','full_name','name','email','phone',
+  'tags','country','timezone','date_created','contact_source','contact_type','full_address','city','state','postal_code',
+  'location','workflow','triggerData','contact','attributionSource','customData','user','company_name','id']);
+
+router.post('/new-lead', async (req, res) => {
+  try {
+    const key = process.env.GHL_WEBHOOK_KEY;
+    if (key && req.query.key !== key) return res.status(401).json({ error: 'bad key' });
+    const b = req.body || {};
+    const custom = b.customData || {};
+    const contactId = b.contact_id || b.contactId || '';
+    if (isDuplicate(`newlead-${contactId || b.email || b.phone || ''}`)) return res.json({ success: true, skipped: 'duplicate' });
+
+    const fullName = b.full_name || `${b.first_name || ''} ${b.last_name || ''}`.trim() || 'Unknown';
+    const pipeline = custom.pipeline || b.pipeline_name || 'Local Service Businesses';
+    const offer = custom.offer || 'Commercial Cleaning';
+    const fields = [
+      { name: 'Time', value: new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' }), inline: true },
+      { name: 'Name', value: contactId ? `[${fullName}](${getContactGHLLink(contactId)})` : fullName, inline: true },
+      { name: 'Email', value: b.email || '', inline: true },
+      { name: 'Phone', value: b.phone || '', inline: true },
+      { name: 'Company', value: b.company_name || custom.company || '', inline: true },
+      { name: 'Country', value: b.country || '', inline: true },
+      { name: 'Pipeline', value: pipeline, inline: true },
+      { name: 'Source', value: custom.source || b.contact_source || '', inline: true },
+      { name: 'Tags', value: Array.isArray(b.tags) ? b.tags.join(', ') : (b.tags || ''), inline: true },
+    ];
+    for (const [k, v] of Object.entries({ ...b, ...custom })) {
+      if (STANDARD_KEYS.has(k) || ['pipeline','offer','source','company'].includes(k)) continue;
+      if (v === null || v === undefined || v === '' || typeof v === 'object') continue;
+      fields.push({ name: k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 256), value: String(v), inline: String(v).length < 40 });
+    }
+    const attr = b.attributionSource || b.contact?.attributionSource;
+    if (attr && typeof attr === 'object') {
+      const lines = ['campaign','adSet','adName','utmSource','utmMedium','utmCampaign','medium','sessionSource']
+        .filter(k => attr[k]).map(k => `${k}: ${attr[k]}`);
+      if (lines.length) fields.push({ name: 'ATTRIBUTION', value: lines.join('\n'), inline: false });
+    }
+
+    const embed = createEmbed(`🙋 New Lead - ${offer}`, fields, COLORS.GREEN);
+    await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('GHL new-lead error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── UPDATE NOTES (Google Sheet → GHL) ────────────────────────────────────────
+router.post('/update-notes', async (req, res) => {
+  try {
+    console.log('UPDATE-NOTES PAYLOAD:', JSON.stringify(req.body));
+    const { contact_id, email, notes, name } = req.body;
+
+    if (!notes) return res.json({ success: false, error: 'No notes provided' });
+
+    let contactId = contact_id;
+
+    const headers = {
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-07-28'
+    };
+
+    // Find contact by email if no contact_id provided
+    if (!contactId && email) {
       try {
-        const key = process.env.GHL_WEBHOOK_KEY;
-        if (key && req.query.key !== key) return res.status(401).json({ error: 'bad key' });
-        const b = req.body || {};
-        const custom = b.customData || {};
-        const contactId = b.contact_id || b.contactId || '';
-        if (isDuplicate(`newlead-${contactId || b.email || b.phone || ''}`)) return res.json({ success: true, skipped: 'duplicate' });
-    
-        const fullName = b.full_name || `${b.first_name || ''} ${b.last_name || ''}`.trim() || 'Unknown';
-        const pipeline = custom.pipeline || b.pipeline_name || 'Local Service Businesses';
-        const offer = custom.offer || 'Commercial Cleaning';
-        const fields = [
-          { name: 'Time', value: new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' }), inline: true },
-          { name: 'Name', value: contactId ? `[${fullName}](${getContactGHLLink(contactId)})` : fullName, inline: true },
-          { name: 'Email', value: b.email || '', inline: true },
-          { name: 'Phone', value: b.phone || '', inline: true },
-          { name: 'Company', value: b.company_name || custom.company || '', inline: true },
-          { name: 'Country', value: b.country || '', inline: true },
-          { name: 'Pipeline', value: pipeline, inline: true },
-          { name: 'Source', value: custom.source || b.contact_source || '', inline: true },
-          { name: 'Tags', value: Array.isArray(b.tags) ? b.tags.join(', ') : (b.tags || ''), inline: true },
-        ];
-        // Any form answers HighLevel sends (custom fields / lead-form questions) appear as extra keys.
-        for (const [k, v] of Object.entries({ ...b, ...custom })) {
-          if (STANDARD_KEYS.has(k) || ['pipeline','offer','source','company'].includes(k)) continue;
-          if (v === null || v === undefined || v === '' || typeof v === 'object') continue;
-          fields.push({ name: k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 256), value: String(v), inline: String(v).length < 40 });
-        }
-        const attr = b.attributionSource || b.contact?.attributionSource;
-        if (attr && typeof attr === 'object') {
-          const lines = ['campaign','adSet','adName','utmSource','utmMedium','utmCampaign','medium','sessionSource']
-            .filter(k => attr[k]).map(k => `${k}: ${attr[k]}`);
-          if (lines.length) fields.push({ name: 'ATTRIBUTION', value: lines.join('\n'), inline: false });
-        }
-    
-        const embed = createEmbed(`🙋 New Lead - ${offer}`, fields, COLORS.GREEN);
-        await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
-        res.json({ success: true });
+        const searchResponse = await axios.get(
+          `https://services.leadconnectorhq.com/contacts/?locationId=${process.env.GHL_LOCATION_ID}&email=${encodeURIComponent(email)}`,
+          { headers }
+        );
+        const contacts = searchResponse.data?.contacts || [];
+        if (contacts.length > 0) contactId = contacts[0].id;
       } catch (err) {
-        console.error('GHL new-lead error:', err.message);
-        res.status(500).json({ error: err.message });
+        console.error('Contact search error:', err.message);
       }
-    });
-    
-    module.exports = router;
-    
+    }
+
+    if (!contactId) {
+      console.log(`No contact found for email: ${email}`);
+      return res.json({ success: false, error: 'Contact not found' });
+    }
+
+    const noteBody = `📋 Sales CRM Notes:\n\n${notes}`;
+
+    // Add note to GHL contact
+    try {
+      await axios.post(
+        `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
+        { body: noteBody },
+        { headers }
+      );
+      console.log('Contact note added for:', contactId);
+    } catch (err) {
+      console.error('Contact note error:', err.response?.data || err.message);
+    }
+
+    // Add note to opportunity (first one found for this contact)
+    try {
+      const oppResponse = await axios.get(
+        `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
+        { headers }
+      );
+      const opportunities = oppResponse.data?.opportunities || [];
+      const pipelineId = process.env.GHL_PIPELINE_ID;
+      const opportunity = pipelineId
+        ? opportunities.find(o => o.pipelineId === pipelineId)
+        : opportunities[0];
+
+      if (opportunity) {
+        await axios.post(
+          `https://services.leadconnectorhq.com/opportunities/${opportunity.id}/notes`,
+          { body: noteBody },
+          { headers }
+        );
+        console.log('Opportunity note added for:', opportunity.id);
+      } else {
+        console.log('No opportunity found for contact:', contactId);
+      }
+    } catch (err) {
+      console.error('Opportunity note error:', err.response?.data || err.message);
+    }
+
+    res.json({ success: true, contactId });
+
+  } catch (err) {
+    console.error('Update notes error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;

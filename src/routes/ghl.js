@@ -346,6 +346,70 @@ router.post('/new-lead', async (req, res) => {
   }
 });
 
+// ── SHEETS CALL NOTES (Google Sheet → GHL) ───────────────────────────────────
+router.post('/sheets/call-notes', async (req, res) => {
+  try {
+    console.log('SHEETS-CALL-NOTES PAYLOAD:', JSON.stringify(req.body));
+    const secret = process.env.SHEETS_SYNC_SECRET;
+    if (secret && req.headers['x-sync-secret'] !== secret) {
+      return res.status(401).json({ error: 'bad secret' });
+    }
+    const { email, notes, name, contact_id } = req.body;
+    if (!notes) return res.json({ success: false, error: 'No notes provided' });
+
+    let contactId = contact_id;
+    const headers = {
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-07-28'
+    };
+
+    if (!contactId && email) {
+      try {
+        const searchResponse = await axios.get(
+          `https://services.leadconnectorhq.com/contacts/?locationId=${process.env.GHL_LOCATION_ID}&email=${encodeURIComponent(email)}`,
+          { headers }
+        );
+        const contacts = searchResponse.data?.contacts || [];
+        if (contacts.length > 0) contactId = contacts[0].id;
+      } catch (err) {
+        console.error('Contact search error:', err.message);
+      }
+    }
+
+    if (!contactId) return res.json({ success: false, error: 'Contact not found' });
+
+    const noteBody = `📋 Sales CRM Notes:\n\n${notes}`;
+
+    try {
+      await axios.post(`https://services.leadconnectorhq.com/contacts/${contactId}/notes`, { body: noteBody }, { headers });
+      console.log('Contact note added for:', contactId);
+    } catch (err) {
+      console.error('Contact note error:', err.response?.data || err.message);
+    }
+
+    try {
+      const oppResponse = await axios.get(
+        `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
+        { headers }
+      );
+      const opportunities = oppResponse.data?.opportunities || [];
+      const opportunity = opportunities[0];
+      if (opportunity) {
+        await axios.post(`https://services.leadconnectorhq.com/opportunities/${opportunity.id}/notes`, { body: noteBody }, { headers });
+        console.log('Opportunity note added for:', opportunity.id);
+      }
+    } catch (err) {
+      console.error('Opportunity note error:', err.response?.data || err.message);
+    }
+
+    res.json({ success: true, contactId });
+  } catch (err) {
+    console.error('Sheets call-notes error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── UPDATE NOTES (Google Sheet → GHL) ────────────────────────────────────────
 router.post('/update-notes', async (req, res) => {
   try {
